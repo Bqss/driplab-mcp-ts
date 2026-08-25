@@ -28,12 +28,13 @@ export function listPayouts(
     params.push(opts.userId);
   }
   const [startMs, endMs] = parseDateRange(opts.dateFrom, opts.dateTo);
+  // Filter by updated_at (status change date) — consistent with sales filter.
   if (startMs !== null) {
-    clauses.push("created_at >= ?");
+    clauses.push("updated_at >= ?");
     params.push(startMs);
   }
   if (endMs !== null) {
-    clauses.push("created_at <= ?");
+    clauses.push("updated_at <= ?");
     params.push(endMs);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -189,12 +190,14 @@ export function listTokenPurchases(
     params.push(opts.status);
   }
   const [startMs, endMs] = parseDateRange(opts.dateFrom, opts.dateTo);
+  // Match admin portal: filter by updated_at (payment/fulfillment date),
+  // not created_at (checkout date). See dripsender SaleController.loadMoreSales.
   if (startMs !== null) {
-    clauses.push("s.created_at >= ?");
+    clauses.push("s.updated_at >= ?");
     params.push(startMs);
   }
   if (endMs !== null) {
-    clauses.push("s.created_at <= ?");
+    clauses.push("s.updated_at <= ?");
     params.push(endMs);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;

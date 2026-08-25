@@ -163,8 +163,10 @@ export function listOrders(
   where(b, db, "sales", "coupon_code", "=", opts.couponCode);
   where(b, db, "sales", "product", "=", opts.product);
   const [startMs, endMs] = parseDateRange(opts.dateFrom, opts.dateTo);
-  where(b, db, "sales", "created_at", ">=", startMs);
-  where(b, db, "sales", "created_at", "<=", endMs);
+  // Match admin portal: filter by updated_at (payment/fulfillment date),
+  // not created_at (checkout date). See wajom SaleController.loadMoreSales.
+  where(b, db, "sales", "updated_at", ">=", startMs);
+  where(b, db, "sales", "updated_at", "<=", endMs);
   const whereSql = b.clauses.length ? `WHERE ${b.clauses.join(" AND ")}` : "";
   const [sql, lim, off] = paginate(
     `SELECT * FROM sales ${whereSql} ORDER BY created_at DESC`,
@@ -209,8 +211,9 @@ export function orderStats(
 ): Record<string, unknown> {
   const b: WhereBuilder = { clauses: [], params: [] };
   const [startMs, endMs] = parseDateRange(opts.dateFrom, opts.dateTo);
-  where(b, db, "sales", "created_at", ">=", startMs);
-  where(b, db, "sales", "created_at", "<=", endMs);
+  // Match admin portal: filter by updated_at (payment/fulfillment date).
+  where(b, db, "sales", "updated_at", ">=", startMs);
+  where(b, db, "sales", "updated_at", "<=", endMs);
   const whereSql = b.clauses.length ? `WHERE ${b.clauses.join(" AND ")}` : "";
   const groupBy = opts.groupBy ?? "status";
 
@@ -231,7 +234,7 @@ export function orderStats(
   if (groupBy === "day" || groupBy === "month") {
     const fmt = groupBy === "day" ? "%Y-%m-%d" : "%Y-%m";
     const rows = db.query<{ key: string; count: number; revenue: number }>(
-      `SELECT strftime('${fmt}', datetime(created_at/1000, 'unixepoch')) AS key, COUNT(*) AS count, COALESCE(SUM(total),0) AS revenue FROM sales ${whereSql} GROUP BY key ORDER BY key`,
+      `SELECT strftime('${fmt}', datetime(updated_at/1000, 'unixepoch')) AS key, COUNT(*) AS count, COALESCE(SUM(total),0) AS revenue FROM sales ${whereSql} GROUP BY key ORDER BY key`,
       ...b.params
     );
     return { group_by: groupBy, buckets: rows };
