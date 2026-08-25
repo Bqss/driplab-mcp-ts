@@ -9,6 +9,7 @@ import * as q from "./core/queries.ts";
 import * as wq from "./core/wajom-queries.ts";
 import {
   type ServerConfig,
+  camelArgs,
   createDbLazy,
   json,
   runServer,
@@ -45,7 +46,7 @@ server.registerTool(
     }),
   },
   async (args) => ({
-    content: [{ type: "text", text: json(q.listUsers(getDb(), args)) }],
+    content: [{ type: "text", text: json(q.listUsers(getDb(), camelArgs(args))) }],
   })
 );
 
@@ -87,7 +88,7 @@ server.registerTool(
       offset: z.number().optional().default(0),
     }),
   },
-  async (args) => ({ content: [{ type: "text", text: json(q.listOrders(getDb(), args)) }] })
+  async (args) => ({ content: [{ type: "text", text: json(q.listOrders(getDb(), camelArgs(args))) }] })
 );
 
 server.registerTool(
@@ -113,7 +114,7 @@ server.registerTool(
       date_to: z.string().optional().nullable(),
     }),
   },
-  async (args) => ({ content: [{ type: "text", text: json(q.orderStats(getDb(), args)) }] })
+  async (args) => ({ content: [{ type: "text", text: json(q.orderStats(getDb(), camelArgs(args))) }] })
 );
 
 server.registerTool(
@@ -127,7 +128,7 @@ server.registerTool(
       offset: z.number().optional().default(0),
     }),
   },
-  async (args) => ({ content: [{ type: "text", text: json(q.listAbandonedCheckouts(getDb(), args)) }] })
+  async (args) => ({ content: [{ type: "text", text: json(q.listAbandonedCheckouts(getDb(), camelArgs(args))) }] })
 );
 
 // -- plans -------------------------------------------------------------------
@@ -167,7 +168,7 @@ server.registerTool(
       offset: z.number().optional().default(0),
     }),
   },
-  async (args) => ({ content: [{ type: "text", text: json(q.listCoupons(getDb(), args)) }] })
+  async (args) => ({ content: [{ type: "text", text: json(q.listCoupons(getDb(), camelArgs(args))) }] })
 );
 
 server.registerTool(
@@ -180,7 +181,7 @@ server.registerTool(
     }),
   },
   async (args) => {
-    const result = q.getCoupon(getDb(), args);
+    const result = q.getCoupon(getDb(), camelArgs(args));
     return { content: [{ type: "text", text: json(result ?? { error: "coupon not found" }) }] };
   }
 );
@@ -200,7 +201,7 @@ server.registerTool(
       offset: z.number().optional().default(0),
     }),
   },
-  async (args) => ({ content: [{ type: "text", text: json(q.listWhatsapps(getDb(), args)) }] })
+  async (args) => ({ content: [{ type: "text", text: json(q.listWhatsapps(getDb(), camelArgs(args))) }] })
 );
 
 server.registerTool(
@@ -238,7 +239,7 @@ server.registerTool(
       offset: z.number().optional().default(0),
     }),
   },
-  async (args) => ({ content: [{ type: "text", text: json(q.listAffiliates(getDb(), args)) }] })
+  async (args) => ({ content: [{ type: "text", text: json(q.listAffiliates(getDb(), camelArgs(args))) }] })
 );
 
 server.registerTool(
@@ -267,7 +268,7 @@ server.registerTool(
       offset: z.number().optional().default(0),
     }),
   },
-  async (args) => ({ content: [{ type: "text", text: json(q.listFeedbacks(getDb(), args)) }] })
+  async (args) => ({ content: [{ type: "text", text: json(q.listFeedbacks(getDb(), camelArgs(args))) }] })
 );
 
 server.registerTool(
@@ -296,7 +297,7 @@ server.registerTool(
       offset: z.number().optional().default(0),
     }),
   },
-  async (args) => ({ content: [{ type: "text", text: json(wq.listClassParticipants(getDb(), args)) }] })
+  async (args) => ({ content: [{ type: "text", text: json(wq.listClassParticipants(getDb(), camelArgs(args))) }] })
 );
 
 server.registerTool(
@@ -309,7 +310,7 @@ server.registerTool(
       date_to: z.string().optional().nullable(),
     }),
   },
-  async (args) => ({ content: [{ type: "text", text: json(wq.classParticipantStats(getDb(), args)) }] })
+  async (args) => ({ content: [{ type: "text", text: json(wq.classParticipantStats(getDb(), camelArgs(args))) }] })
 );
 
 // -- entry -------------------------------------------------------------------

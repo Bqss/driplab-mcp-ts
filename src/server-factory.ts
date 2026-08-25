@@ -49,6 +49,20 @@ export function json(obj: unknown): string {
   return JSON.stringify(obj, null, 2);
 }
 
+/**
+ * Convert snake_case object keys to camelCase.
+ * MCP tool args convention is snake_case (date_from, user_id), but the
+ * query functions expect camelCase (dateFrom, userId). Without this, every
+ * snake_case filter is silently dropped because the property never matches.
+ */
+export function camelArgs<T extends Record<string, unknown>>(args: T): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    out[k.replace(/_([a-z])/g, (_, c) => c.toUpperCase())] = v;
+  }
+  return out;
+}
+
 /** Run an MCP server with transport selected via env vars. */
 export function runServer(server: McpServer, config: ServerConfig): void {
   const transport = process.env.MCP_TRANSPORT ?? "stdio";
