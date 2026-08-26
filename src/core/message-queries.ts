@@ -256,32 +256,48 @@ export async function messageStatsByUser(
   const paged = users.slice(offset, offset + limit);
 
   // Summary: paid vs free.
+  // NOTE: avg_*_messages uses portal_total_sent (persistent counters from backfill
+  // + increment), NOT queue scan. Queue scan only covers devices reachable via
+  // HTTP (often <20% of devices), so using it for averages would massively
+  // undercount. Portal counters cover ALL devices regardless of HTTP reachability.
+  const paidUsers = users.filter((u) => u.paid_user);
+  const freeUsers = users.filter((u) => !u.paid_user);
   const summary = {
     total_users: users.length,
-    paid_users: users.filter((u) => u.paid_user).length,
-    free_users: users.filter((u) => !u.paid_user).length,
+    paid_users: paidUsers.length,
+    free_users: freeUsers.length,
     devices_total: perDevice.length,
     devices_with_db: perDevice.filter((d) => d.db_found).length,
     devices_missing_db: perDevice.filter((d) => !d.db_found).length,
-    // Queue-scan counts (current queue only, may be cleared by admin).
-    paid_sent: users.filter((u) => u.paid_user).reduce((s, u) => s + u.sent_count, 0),
-    paid_read: users.filter((u) => u.paid_user).reduce((s, u) => s + u.read_count, 0),
-    paid_total: users.filter((u) => u.paid_user).reduce((s, u) => s + u.total_queue, 0),
-    free_sent: users.filter((u) => !u.paid_user).reduce((s, u) => s + u.sent_count, 0),
-    free_read: users.filter((u) => !u.paid_user).reduce((s, u) => s + u.read_count, 0),
-    free_total: users.filter((u) => !u.paid_user).reduce((s, u) => s + u.total_queue, 0),
-    // Portal running totals (persistent, not affected by queue clearing).
+    // Queue-scan counts (current queue only, may be cleared by admin, partial coverage).
+    paid_sent: paidUsers.reduce((s, u) => s + u.sent_count, 0),
+    paid_read: paidUsers.reduce((s, u) => s + u.read_count, 0),
+    paid_total: paidUsers.reduce((s, u) => s + u.total_queue, 0),
+    free_sent: freeUsers.reduce((s, u) => s + u.sent_count, 0),
+    free_read: freeUsers.reduce((s, u) => s + u.read_count, 0),
+    free_total: freeUsers.reduce((s, u) => s + u.total_queue, 0),
+    // Portal running totals (persistent, not affected by queue clearing, full coverage).
     portal_total_sent: users.reduce((s, u) => s + u.portal_total_sent, 0),
     portal_chat_ai_sent: users.reduce((s, u) => s + u.portal_chat_ai_sent, 0),
     portal_trial_sent: users.reduce((s, u) => s + u.portal_trial_sent, 0),
     cap_reached_users: users.filter((u) => u.cap_reached_at !== null).length,
+    // Averages based on portal_total_sent (full coverage), not queue scan (partial).
     avg_paid_messages: 0,
     avg_free_messages: 0,
+    // Chat AI averages (subset of total_sent).
+    avg_paid_chat_ai: 0,
+    avg_free_chat_ai: 0,
   };
   const paidCount = summary.paid_users || 1;
   const freeCount = summary.free_users || 1;
-  summary.avg_paid_messages = +(summary.paid_total / paidCount).toFixed(2);
-  summary.avg_free_messages = +(summary.free_total / freeCount).toFixed(2);
+  const paidPortalSent = paidUsers.reduce((s, u) => s + u.portal_total_sent, 0);
+  const freePortalSent = freeUsers.reduce((s, u) => s + u.portal_total_sent, 0);
+  const paidChatAi = paidUsers.reduce((s, u) => s + u.portal_chat_ai_sent, 0);
+  const freeChatAi = freeUsers.reduce((s, u) => s + u.portal_chat_ai_sent, 0);
+  summary.avg_paid_messages = +(paidPortalSent / paidCount).toFixed(2);
+  summary.avg_free_messages = +(freePortalSent / freeCount).toFixed(2);
+  summary.avg_paid_chat_ai = +(paidChatAi / paidCount).toFixed(2);
+  summary.avg_free_chat_ai = +(freeChatAi / freeCount).toFixed(2);
 
   return { summary, users: paged, devices: perDevice.length };
 }
