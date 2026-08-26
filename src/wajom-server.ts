@@ -7,6 +7,8 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import * as q from "./core/queries.ts";
 import * as wq from "./core/wajom-queries.ts";
+import * as tq from "./core/trial-queries.ts";
+import * as mq from "./core/message-queries.ts";
 import {
   type ServerConfig,
   camelArgs,
@@ -25,6 +27,11 @@ const config: ServerConfig = {
 
 const getDb = createDbLazy(config);
 const server = new McpServer({ name: config.name, version: "0.1.0" });
+
+// WA server DB directory — where per-instance SQLite files live ({port}.sqlite3).
+// Required for message stats tools. Falls back to empty string (tools return
+// "db not found" gracefully) if not set.
+const waServerDbDir = process.env.WA_SERVER_DB_DIR ?? "";
 
 // -- users -------------------------------------------------------------------
 
@@ -311,6 +318,119 @@ server.registerTool(
     }),
   },
   async (args) => ({ content: [{ type: "text", text: json(wq.classParticipantStats(getDb(), camelArgs(args))) }] })
+);
+
+// -- trial analytics ---------------------------------------------------------
+// Mirrors the admin "User Free Trial" dashboard (wajom commit c6c7679).
+// message_counter = SUM(whatsapps.trial_sent_count); status via computeTrialStatus.
+
+server.registerTool(
+  "wajom_list_trial_users",
+  {
+    description:
+      "List Wajom trial-like users (no membership_date) with computed message_counter (SUM of whatsapps.trial_sent_count), trial status (converted/trial_limit_reached/trial_expired/active/golden_time/dormant), last activity, and device counts. Statuses match the admin User Free Trial dashboard. Filter by status, search, plan, signup date range, and message count range.",
+    inputSchema: z.object({
+      status: z.string().optional().nullable(),
+      search: z.string().optional().nullable(),
+      plan_id: z.string().optional().nullable(),
+      date_from: z.string().optional().nullable(),
+      date_to: z.string().optional().nullable(),
+      min_messages: z.number().optional().nullable(),
+      max_messages: z.number().optional().nullable(),
+      limit: z.number().optional().default(50),
+      offset: z.number().optional().default(0),
+    }),
+  },
+  async (args) => ({ content: [{ type: "text", text: json(tq.listTrialUsers(getDb(), camelArgs(args))) }] })
+);
+
+server.registerTool(
+  "wajom_get_trial_user",
+  {
+    description:
+      "Get a single Wajom trial user's full detail: computed message_counter, trial status, daily activity events (last 30 days), recent transactions, plan, and WhatsApp devices with trial_sent_count. Use for the trial detail modal.",
+    inputSchema: z.object({ user_id: z.string() }),
+  },
+  async (args) => {
+    const result = tq.getTrialUserDetail(getDb(), args.user_id);
+    return { content: [{ type: "text", text: json(result ?? { error: "trial user not found" }) }] };
+  }
+);
+
+server.registerTool(
+  "wajom_trial_stats",
+  {
+    description:
+      "Aggregate Wajom trial cohort statistics: counts by trial status, conversion rate, verified/with-devices/with-messages/limit-reached counts, average and max messages, and message-count distribution buckets (0, 1-10, 11-25, 26-49, 50 cap). Filter by signup date range.",
+    inputSchema: z.object({
+      date_from: z.string().optional().nullable(),
+      date_to: z.string().optional().nullable(),
+    }),
+  },
+  async (args) => ({ content: [{ type: "text", text: json(tq.trialStats(getDb(), camelArgs(args))) }] })
+);
+
+server.registerTool(
+  "wajom_trial_funnel",
+  {
+    description:
+      "Wajom trial cohort funnel: signup -> verified -> has_device -> connected -> purchased. Returns stage counts, stage percentages, and drop-off between stages. Implements the 'ubah trial menjadi loop yang bisa diaudit' recommendation from the Aug-2026 trial readout. Filter by signup date range (users.created_at).",
+    inputSchema: z.object({
+      date_from: z.string().optional().nullable(),
+      date_to: z.string().optional().nullable(),
+    }),
+  },
+  async (args) => ({ content: [{ type: "text", text: json(tq.trialFunnel(getDb(), camelArgs(args))) }] })
+);
+
+server.registerTool(
+  "wajom_paid_user_audit",
+  {
+    description:
+      "Audit Wajom paid_user vs purchase_number vs sales mismatches. Flags three classes: (1) paid_user=1 but no Purchase/Complete sale (stale flag), (2) purchase_number>0 but paid_user=0 (under-flagged), (3) has Purchase sale but purchase_number=0 (counter not incremented). Returns summary counts + paginated mismatch detail. Implements recommendation #1 from the Aug-2026 trial readout.",
+    inputSchema: z.object({
+      limit: z.number().optional().default(50),
+      offset: z.number().optional().default(0),
+    }),
+  },
+  async (args) => ({ content: [{ type: "text", text: json(tq.paidUserAudit(getDb(), camelArgs(args))) }] })
+);
+
+// -- message analytics (WA server multi-DB) ----------------------------------
+// Reads per-instance WA server DBs ({WA_SERVER_DB_DIR}/{port}.sqlite3) to
+// aggregate outbound message counts from the `queue` table. Answers SlugPost
+// "mcpipditis" questions: pesan terkirim paid vs free user.
+
+server.registerTool(
+  "wajom_message_stats",
+  {
+    description:
+      "Aggregate outbound WhatsApp message counts per user (paid vs free). Combines portal persistent counters (total_sent_count, chat_ai_sent_count, trial_sent_count, cap_reached_at — not affected by queue clearing) with WA server queue scan via HTTP (current queue rows by status — may be cleared by admin). Fetches from each WA server instance: GET {whatsapps.connect_url}/api/queue/stats. No WA_SERVER_DB_DIR needed — uses HTTP. Returns summary (paid vs free totals + averages + portal totals) and per-user breakdown.",
+    inputSchema: z.object({
+      paid_only: z.boolean().optional().nullable(),
+      free_only: z.boolean().optional().nullable(),
+      date_from: z.string().optional().nullable(),
+      date_to: z.string().optional().nullable(),
+      limit: z.number().optional().default(50),
+      offset: z.number().optional().default(0),
+    }),
+  },
+  async (args) => ({ content: [{ type: "text", text: json(await mq.messageStatsByUser(getDb(), waServerDbDir, camelArgs(args))) }] })
+);
+
+server.registerTool(
+  "wajom_device_message_stats",
+  {
+    description:
+      "Per-device WhatsApp message breakdown by status (sent/read/failed/waiting/sending/stop), by source (chat_ai/campaign/drip/loop/bot_rule/botform/crm/integration/manual), daily counts (last 30 days), and recent messages. Fetches from WA server instance via HTTP: GET {whatsapps.connect_url}/api/queue/stats. Also returns portal persistent counters (total_sent_count, chat_ai_sent_count, trial_sent_count, cap_reached_at). No WA_SERVER_DB_DIR needed — uses HTTP.",
+    inputSchema: z.object({
+      whatsapp_id: z.string(),
+      date_from: z.string().optional().nullable(),
+      date_to: z.string().optional().nullable(),
+      recent_limit: z.number().optional().default(20),
+    }),
+  },
+  async (args) => ({ content: [{ type: "text", text: json(await mq.deviceMessageStats(getDb(), waServerDbDir, args.whatsapp_id, camelArgs(args))) }] })
 );
 
 // -- entry -------------------------------------------------------------------

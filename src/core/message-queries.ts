@@ -1,0 +1,380 @@
+/**
+ * Message statistics queries — aggregate outbound message counts from
+ * WhatsApp server (wajom-client) instances via HTTP API.
+ *
+ * Arsitektur: setiap WhatsApp device = 1 WA server instance dengan
+ * HTTP endpoint sendiri (whatsapps.connect_url). MCP memanggil:
+ *   GET {connect_url}/api/queue/stats?date_from=&date_to=
+ *
+ * Tidak perlu akses filesystem ke WA server DB — cukup HTTP.
+ * Bisa jalan bahkan ketika MCP dan WA server di VPS berbeda.
+ *
+ * Dua sumber data:
+ *   1. Portal DB (whatsapps table): total_sent_count, chat_ai_sent_count,
+ *      trial_sent_count, cap_reached_at — persistent running totals.
+ *   2. WA server HTTP API: queue status breakdown, daily counts,
+ *      recent messages — current queue only (may be cleared by admin).
+ *
+ * Jawab pertanyaan SlugPost "mcpipditis":
+ *   - Berapa pesan terkirim oleh paid user?  → portal_total_sent
+ *   - Berapa pesan terkirim oleh free user?  → portal_total_sent
+ *   - Per-device breakdown by status.         → WA server API
+ *   - Pesan Chat AI per user?                → portal_chat_ai_sent
+ *   - Free user cap 100% lalu upgrade?        → cap_reached_at + sales
+ */
+
+import { SqlDatabase } from "./db.ts";
+import { stripPii } from "./pii.ts";
+import { epochMsToIso } from "./time.ts";
+import { fetchQueueStats, fetchQueueStatsBatch, type QueueStatsResponse } from "./wa-server-api.ts";
+
+type Row = Record<string, unknown>;
+
+interface DeviceMessageCount {
+  whatsapp_id: string;
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  phone: string;
+  status: string;
+  port: number | null;
+  connect_url: string | null;
+  paid_user: boolean;
+  plan_id: string | null;
+  sent_count: number;
+  read_count: number;
+  failed_count: number;
+  waiting_count: number;
+  total_queue: number;
+  db_found: boolean;
+  portal_total_sent: number;
+  portal_chat_ai_sent: number;
+  portal_trial_sent: number;
+  cap_reached_at: number | null;
+}
+
+/**
+ * Aggregate message stats per user (paid vs free).
+ *
+ * Baca portal DB untuk user/device info + portal counters.
+ * Hit WA server HTTP API untuk queue status breakdown.
+ * Group per user, return summary + per-user breakdown.
+ */
+export async function messageStatsByUser(
+  mainDb: SqlDatabase,
+  _waServerDbDir: string, // kept for backward compat, unused (HTTP mode)
+  opts: {
+    paidOnly?: boolean | null;
+    freeOnly?: boolean | null;
+    dateFrom?: string | null;
+    dateTo?: string | null;
+    limit?: number;
+    offset?: number;
+  } = {}
+): Promise<Record<string, unknown>> {
+  if (!mainDb.hasTable("whatsapps")) {
+    return { error: "whatsapps table not found in main DB" };
+  }
+  if (!mainDb.hasTable("users")) {
+    return { error: "users table not found in main DB" };
+  }
+
+  // Ambil semua device non-deleted + join user info + connect_url.
+  const b: { clauses: string[]; params: unknown[] } = { clauses: [], params: [] };
+  b.clauses.push("(w.delete_time IS NULL OR w.delete_time = 0)");
+  if (opts.paidOnly === true) b.clauses.push("u.paid_user = 1");
+  if (opts.freeOnly === true) b.clauses.push("(u.paid_user = 0 OR u.paid_user IS NULL)");
+
+  const whereSql = `WHERE ${b.clauses.join(" AND ")}`;
+  const devices = mainDb.query<{
+    id: string;
+    user_id: string;
+    phone: string;
+    status: string;
+    port: number | null;
+    connect_url: string | null;
+    user_name: string;
+    user_email: string;
+    paid_user: number;
+    plan_id: string | null;
+    total_sent_count: number;
+    chat_ai_sent_count: number;
+    trial_sent_count: number;
+    cap_reached_at: number | null;
+  }>(
+    `SELECT w.id, w.user_id, w.phone, w.status, w.port, w.connect_url,
+            u.name AS user_name, u.email AS user_email,
+            u.paid_user, u.plan_id,
+            COALESCE(w.total_sent_count, 0) AS total_sent_count,
+            COALESCE(w.chat_ai_sent_count, 0) AS chat_ai_sent_count,
+            COALESCE(w.trial_sent_count, 0) AS trial_sent_count,
+            w.cap_reached_at
+       FROM whatsapps w
+       INNER JOIN users u ON u.id = w.user_id
+      ${whereSql}
+      ORDER BY u.created_at DESC`,
+    ...b.params
+  );
+
+  // Fetch queue stats from WA server instances via HTTP (batch, parallel).
+  const devicesWithUrl = devices
+    .filter((d) => d.connect_url)
+    .map((d) => ({ id: d.id, connect_url: d.connect_url! }));
+  const queueStatsMap = await fetchQueueStatsBatch(devicesWithUrl, {
+    dateFrom: opts.dateFrom,
+    dateTo: opts.dateTo,
+  });
+
+  // Build per-device results.
+  const perDevice: DeviceMessageCount[] = [];
+  for (const d of devices) {
+    const stats = queueStatsMap.get(d.id);
+    let counts = { sent: 0, read: 0, failed: 0, waiting: 0, total: 0 };
+    let dbFound = false;
+
+    if (stats) {
+      dbFound = true;
+      counts = {
+        sent: stats.by_status["sent"] || 0,
+        read: stats.by_status["read"] || 0,
+        failed: (stats.by_status["failed"] || 0) + (stats.by_status["stop"] || 0),
+        waiting: (stats.by_status["waiting"] || 0) + (stats.by_status["sending"] || 0),
+        total: stats.total || 0,
+      };
+    }
+
+    perDevice.push({
+      whatsapp_id: d.id,
+      user_id: d.user_id,
+      user_name: d.user_name,
+      user_email: d.user_email,
+      phone: d.phone,
+      status: d.status,
+      port: d.port,
+      connect_url: d.connect_url,
+      paid_user: d.paid_user === 1,
+      plan_id: d.plan_id,
+      sent_count: counts.sent,
+      read_count: counts.read,
+      failed_count: counts.failed,
+      waiting_count: counts.waiting,
+      total_queue: counts.total,
+      db_found: dbFound,
+      portal_total_sent: d.total_sent_count,
+      portal_chat_ai_sent: d.chat_ai_sent_count,
+      portal_trial_sent: d.trial_sent_count,
+      cap_reached_at: d.cap_reached_at,
+    });
+  }
+
+  // Group per user.
+  const byUser = new Map<string, {
+    user_id: string;
+    user_name: string;
+    user_email: string;
+    paid_user: boolean;
+    plan_id: string | null;
+    device_count: number;
+    devices_with_db: number;
+    sent_count: number;
+    read_count: number;
+    failed_count: number;
+    waiting_count: number;
+    total_queue: number;
+    portal_total_sent: number;
+    portal_chat_ai_sent: number;
+    portal_trial_sent: number;
+    cap_reached_at: number | null;
+  }>();
+
+  for (const d of perDevice) {
+    let u = byUser.get(d.user_id);
+    if (!u) {
+      u = {
+        user_id: d.user_id,
+        user_name: d.user_name,
+        user_email: d.user_email,
+        paid_user: d.paid_user,
+        plan_id: d.plan_id,
+        device_count: 0,
+        devices_with_db: 0,
+        sent_count: 0,
+        read_count: 0,
+        failed_count: 0,
+        waiting_count: 0,
+        total_queue: 0,
+        portal_total_sent: 0,
+        portal_chat_ai_sent: 0,
+        portal_trial_sent: 0,
+        cap_reached_at: null,
+      };
+      byUser.set(d.user_id, u);
+    }
+    u.device_count++;
+    if (d.db_found) u.devices_with_db++;
+    u.sent_count += d.sent_count;
+    u.read_count += d.read_count;
+    u.failed_count += d.failed_count;
+    u.waiting_count += d.waiting_count;
+    u.total_queue += d.total_queue;
+    u.portal_total_sent += d.portal_total_sent;
+    u.portal_chat_ai_sent += d.portal_chat_ai_sent;
+    u.portal_trial_sent += d.portal_trial_sent;
+    if (d.cap_reached_at && (!u.cap_reached_at || d.cap_reached_at < u.cap_reached_at)) {
+      u.cap_reached_at = d.cap_reached_at;
+    }
+  }
+
+  let users = Array.from(byUser.values()).sort((a, b) => b.total_queue - a.total_queue);
+
+  // Pagination.
+  const limit = Math.max(1, Math.min(opts.limit ?? 50, 200));
+  const offset = Math.max(0, opts.offset ?? 0);
+  const paged = users.slice(offset, offset + limit);
+
+  // Summary: paid vs free.
+  const summary = {
+    total_users: users.length,
+    paid_users: users.filter((u) => u.paid_user).length,
+    free_users: users.filter((u) => !u.paid_user).length,
+    devices_total: perDevice.length,
+    devices_with_db: perDevice.filter((d) => d.db_found).length,
+    devices_missing_db: perDevice.filter((d) => !d.db_found).length,
+    // Queue-scan counts (current queue only, may be cleared by admin).
+    paid_sent: users.filter((u) => u.paid_user).reduce((s, u) => s + u.sent_count, 0),
+    paid_read: users.filter((u) => u.paid_user).reduce((s, u) => s + u.read_count, 0),
+    paid_total: users.filter((u) => u.paid_user).reduce((s, u) => s + u.total_queue, 0),
+    free_sent: users.filter((u) => !u.paid_user).reduce((s, u) => s + u.sent_count, 0),
+    free_read: users.filter((u) => !u.paid_user).reduce((s, u) => s + u.read_count, 0),
+    free_total: users.filter((u) => !u.paid_user).reduce((s, u) => s + u.total_queue, 0),
+    // Portal running totals (persistent, not affected by queue clearing).
+    portal_total_sent: users.reduce((s, u) => s + u.portal_total_sent, 0),
+    portal_chat_ai_sent: users.reduce((s, u) => s + u.portal_chat_ai_sent, 0),
+    portal_trial_sent: users.reduce((s, u) => s + u.portal_trial_sent, 0),
+    cap_reached_users: users.filter((u) => u.cap_reached_at !== null).length,
+    avg_paid_messages: 0,
+    avg_free_messages: 0,
+  };
+  const paidCount = summary.paid_users || 1;
+  const freeCount = summary.free_users || 1;
+  summary.avg_paid_messages = +(summary.paid_total / paidCount).toFixed(2);
+  summary.avg_free_messages = +(summary.free_total / freeCount).toFixed(2);
+
+  return { summary, users: paged, devices: perDevice.length };
+}
+
+/**
+ * Per-device message breakdown by status.
+ *
+ * Hit WA server HTTP API untuk device tertentu, return breakdown
+ * by status + source + daily counts + recent messages.
+ */
+export async function deviceMessageStats(
+  mainDb: SqlDatabase,
+  _waServerDbDir: string, // kept for backward compat, unused (HTTP mode)
+  whatsappId: string,
+  opts: {
+    dateFrom?: string | null;
+    dateTo?: string | null;
+    recentLimit?: number;
+  } = {}
+): Promise<Record<string, unknown>> {
+  if (!mainDb.hasTable("whatsapps")) {
+    return { error: "whatsapps table not found" };
+  }
+
+  const wa = mainDb.queryOne<{
+    id: string;
+    user_id: string;
+    phone: string;
+    status: string;
+    port: number | null;
+    connect_url: string | null;
+    name: string;
+    total_sent_count: number;
+    chat_ai_sent_count: number;
+    trial_sent_count: number;
+    cap_reached_at: number | null;
+  }>(
+    `SELECT id, user_id, phone, status, port, connect_url, name,
+            COALESCE(total_sent_count, 0) AS total_sent_count,
+            COALESCE(chat_ai_sent_count, 0) AS chat_ai_sent_count,
+            COALESCE(trial_sent_count, 0) AS trial_sent_count,
+            cap_reached_at
+       FROM whatsapps WHERE id = ?`,
+    whatsappId
+  );
+  if (!wa) return { error: "whatsapp device not found" };
+
+  const user = mainDb.queryOne<{ name: string; email: string; paid_user: number; plan_id: string | null }>(
+    "SELECT name, email, paid_user, plan_id FROM users WHERE id = ?",
+    wa.user_id
+  );
+
+  if (!wa.connect_url) {
+    return {
+      whatsapp: stripPii([{ ...wa }], "whatsapps")[0],
+      user: user ? stripPii([user], "users")[0] : null,
+      port: wa.port,
+      connect_url: null,
+      db_found: false,
+      error: "Device has no connect_url — cannot reach WA server instance.",
+      portal_counters: {
+        total_sent_count: wa.total_sent_count,
+        chat_ai_sent_count: wa.chat_ai_sent_count,
+        trial_sent_count: wa.trial_sent_count,
+        cap_reached_at: wa.cap_reached_at,
+      },
+    };
+  }
+
+  const stats = await fetchQueueStats(wa.connect_url, {
+    dateFrom: opts.dateFrom,
+    dateTo: opts.dateTo,
+  });
+
+  if (!stats) {
+    return {
+      whatsapp: stripPii([{ ...wa }], "whatsapps")[0],
+      user: user ? stripPii([user], "users")[0] : null,
+      port: wa.port,
+      connect_url: wa.connect_url,
+      db_found: false,
+      error: "WA server instance unreachable (offline, sleep, or timeout).",
+      portal_counters: {
+        total_sent_count: wa.total_sent_count,
+        chat_ai_sent_count: wa.chat_ai_sent_count,
+        trial_sent_count: wa.trial_sent_count,
+        cap_reached_at: wa.cap_reached_at,
+      },
+    };
+  }
+
+  // Limit recent messages to requested count.
+  const recentLimit = Math.max(1, Math.min(opts.recentLimit ?? 20, 100));
+  const recent = (stats.recent || []).slice(0, recentLimit).map((r) => ({
+    ...r,
+    send_at: epochMsToIso(r.send_at),
+  }));
+
+  return {
+    whatsapp: stripPii([{ ...wa }], "whatsapps")[0],
+    user: user ? stripPii([user], "users")[0] : null,
+    port: wa.port,
+    connect_url: wa.connect_url,
+    db_found: true,
+    by_status: stats.by_status,
+    by_source: stats.by_source,
+    total: stats.total,
+    delivered: stats.delivered,
+    chat_ai_count: stats.chat_ai_count,
+    daily: stats.daily,
+    recent_messages: recent,
+    portal_counters: {
+      total_sent_count: wa.total_sent_count,
+      chat_ai_sent_count: wa.chat_ai_sent_count,
+      trial_sent_count: wa.trial_sent_count,
+      cap_reached_at: epochMsToIso(wa.cap_reached_at),
+    },
+  };
+}

@@ -54,6 +54,10 @@ const ALLOWED_COLUMNS: Record<string, string[]> = {
     "notif_phone", "notif_phone_active", "enable_wtc", "wtc_number", "wtc_interval",
     "created_at", "updated_at", "timezone_offset", "working_hours", "open_hour",
     "open_minute", "close_hour", "close_minute", "working_days",
+    "trial_sent_count",
+    "total_sent_count",
+    "chat_ai_sent_count",
+    "cap_reached_at",
   ],
   servers: [
     "id", "name", "server_url", "connect_url", "capasity", "usage", "available",

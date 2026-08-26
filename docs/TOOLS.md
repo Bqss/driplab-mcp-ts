@@ -1,10 +1,10 @@
 # Tools Reference — driplab-mcp
 
-Daftar lengkap semua tool yang tersedia di kedua MCP server. Total **42 tools** (19 Wajom + 23 Dripsender).
+Daftar lengkap semua tool yang tersedia di kedua MCP server. Total **49 tools** (26 Wajom + 23 Dripsender).
 
 Semua tool read-only. Timestamps di-convert dari epoch-ms ke ISO-8601 UTC. Kolom sensitif (password, api_key, token) di-strip sebelum output.
 
-## Wajom MCP Server (19 tools)
+## Wajom MCP Server (26 tools)
 
 Currency: **MYR** (Malaysian Ringgit).
 
@@ -204,6 +204,108 @@ Class participant funnel stats: conversion by status, revenue, top affiliates.
 |---|---|---|---|
 | `date_from` | string | optional | — |
 | `date_to` | string | optional | — |
+
+### Trial Analytics
+
+Trial analytics tools mirror the admin "User Free Trial" dashboard (wajom commit `c6c7679`).
+`message_counter` = `SUM(whatsapps.trial_sent_count)` per user. `status` computed via
+`computeTrialStatus` (converted / trial_limit_reached / trial_expired / active / golden_time / dormant).
+Thresholds: trial duration 7 days, message cap 50, golden time 3 days, dormant 5 days.
+
+#### `wajom_list_trial_users`
+List trial-like users (no `membership_date`) with computed `message_counter`, `status`, last activity, device counts.
+
+Statuses: `converted`, `trial_limit_reached`, `trial_expired`, `active`, `golden_time`, `dormant`.
+
+| Parameter | Type | Required | Default |
+|---|---|---|---|
+| `status` | string | optional | — |
+| `search` | string | optional | — |
+| `plan_id` | string | optional | — |
+| `date_from` | string | optional | — |
+| `date_to` | string | optional | — |
+| `min_messages` | number | optional | — |
+| `max_messages` | number | optional | — |
+| `limit` | number | optional | 50 |
+| `offset` | number | optional | 0 |
+
+#### `wajom_get_trial_user`
+Get single trial user detail: message_counter, status, daily activity (30 days), transactions, plan, devices.
+
+| Parameter | Type | Required | Default |
+|---|---|---|---|
+| `user_id` | string | **required** | — |
+
+#### `wajom_trial_stats`
+Aggregate trial cohort stats: counts by status, conversion rate, message distribution buckets.
+
+| Parameter | Type | Required | Default |
+|---|---|---|---|
+| `date_from` | string | optional | — |
+| `date_to` | string | optional | — |
+
+#### `wajom_trial_funnel`
+Cohort funnel: `signup -> verified -> has_device -> connected -> purchased`. Returns stage counts, percentages, drop-off.
+
+| Parameter | Type | Required | Default |
+|---|---|---|---|
+| `date_from` | string | optional | — |
+| `date_to` | string | optional | — |
+
+#### `wajom_paid_user_audit`
+Audit `paid_user` vs `purchase_number` vs `sales` mismatches. Flags stale flags, under-flagged, and uncounted sales.
+
+| Parameter | Type | Required | Default |
+|---|---|---|---|
+| `limit` | number | optional | 50 |
+| `offset` | number | optional | 0 |
+
+### Message Analytics (WA server HTTP API + portal counters)
+
+Message analytics tools combine two data sources:
+
+1. **Portal running totals** (`whatsapps.total_sent_count`, `chat_ai_sent_count`,
+   `trial_sent_count`, `cap_reached_at`) — persistent counters incremented via
+   HTTP from wajom-client on every outbound message. Not affected by queue
+   clearing. Backfilled from historical queue data via `backfill-counters.ts`.
+
+2. **WA server queue scan via HTTP** (`GET {whatsapps.connect_url}/api/queue/stats`)
+   — current queue rows by status (sent/read/failed/waiting) and by source
+   (chat_ai/campaign/drip/loop/bot_rule/botform/crm/integration/manual).
+   Cleared periodically by admin, so reflects only messages still in queue.
+
+No `WA_SERVER_DB_DIR` needed — MCP hits each WA server instance's HTTP
+endpoint directly using `whatsapps.connect_url` from the portal DB.
+Works even when MCP and WA server are on different VPSs.
+
+Requires WA server to expose `GET /api/queue/stats` endpoint
+(added in wajom-client `CampaignController.queueStats`).
+
+#### `wajom_message_stats`
+Aggregate outbound WhatsApp message counts per user (paid vs free).
+- Summary: paid/free totals + averages (queue scan) + portal running totals
+  (`portal_total_sent`, `portal_chat_ai_sent`, `portal_trial_sent`,
+  `cap_reached_users`)
+- Per-user: queue counts + portal counters + `cap_reached_at` timestamp
+
+| Parameter | Type | Required | Default |
+|---|---|---|---|
+| `paid_only` | boolean | optional | — |
+| `free_only` | boolean | optional | — |
+| `date_from` | string | optional | — |
+| `date_to` | string | optional | — |
+| `limit` | number | optional | 50 |
+| `offset` | number | optional | 0 |
+
+#### `wajom_device_message_stats`
+Per-device message breakdown by status (sent/read/failed/waiting/sending/stop), daily counts (30 days), recent messages.
+
+| Parameter | Type | Required | Default |
+|---|---|---|---|
+| `whatsapp_id` | string | **required** | — |
+| `date_from` | string | optional | — |
+| `date_to` | string | optional | — |
+| `recent_limit` | number | optional | 20 |
 
 ---
 
