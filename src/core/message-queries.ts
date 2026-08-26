@@ -255,17 +255,27 @@ export async function messageStatsByUser(
   const offset = Math.max(0, opts.offset ?? 0);
   const paged = users.slice(offset, offset + limit);
 
-  // Summary: paid vs free.
+  // Summary: paid vs free, with free split into never_paid vs expired.
   // NOTE: avg_*_messages uses portal_total_sent (persistent counters from backfill
   // + increment), NOT queue scan. Queue scan only covers devices reachable via
   // HTTP (often <20% of devices), so using it for averages would massively
   // undercount. Portal counters cover ALL devices regardless of HTTP reachability.
+  //
+  // "free" is split because membership_date <= today includes EXPIRED paid users
+  // who accumulated thousands of messages while active. Mixing them with true
+  // trial users (never paid) skews the free average up significantly.
   const paidUsers = users.filter((u) => u.paid_user);
   const freeUsers = users.filter((u) => !u.paid_user);
+  // free = never_paid (no membership_date) + expired (membership_date in past)
+  const today = new Date().toISOString().slice(0, 10);
+  const neverPaidUsers = freeUsers.filter((u) => !u.membership_date || u.membership_date === "");
+  const expiredUsers = freeUsers.filter((u) => u.membership_date && u.membership_date !== "" && u.membership_date <= today);
   const summary = {
     total_users: users.length,
     paid_users: paidUsers.length,
     free_users: freeUsers.length,
+    never_paid_users: neverPaidUsers.length,
+    expired_users: expiredUsers.length,
     devices_total: perDevice.length,
     devices_with_db: perDevice.filter((d) => d.db_found).length,
     devices_missing_db: perDevice.filter((d) => !d.db_found).length,
@@ -284,18 +294,26 @@ export async function messageStatsByUser(
     // Averages based on portal_total_sent (full coverage), not queue scan (partial).
     avg_paid_messages: 0,
     avg_free_messages: 0,
+    avg_never_paid_messages: 0,
+    avg_expired_messages: 0,
     // Chat AI averages (subset of total_sent).
     avg_paid_chat_ai: 0,
     avg_free_chat_ai: 0,
   };
   const paidCount = summary.paid_users || 1;
   const freeCount = summary.free_users || 1;
+  const neverPaidCount = summary.never_paid_users || 1;
+  const expiredCount = summary.expired_users || 1;
   const paidPortalSent = paidUsers.reduce((s, u) => s + u.portal_total_sent, 0);
   const freePortalSent = freeUsers.reduce((s, u) => s + u.portal_total_sent, 0);
+  const neverPaidSent = neverPaidUsers.reduce((s, u) => s + u.portal_total_sent, 0);
+  const expiredSent = expiredUsers.reduce((s, u) => s + u.portal_total_sent, 0);
   const paidChatAi = paidUsers.reduce((s, u) => s + u.portal_chat_ai_sent, 0);
   const freeChatAi = freeUsers.reduce((s, u) => s + u.portal_chat_ai_sent, 0);
   summary.avg_paid_messages = +(paidPortalSent / paidCount).toFixed(2);
   summary.avg_free_messages = +(freePortalSent / freeCount).toFixed(2);
+  summary.avg_never_paid_messages = +(neverPaidSent / neverPaidCount).toFixed(2);
+  summary.avg_expired_messages = +(expiredSent / expiredCount).toFixed(2);
   summary.avg_paid_chat_ai = +(paidChatAi / paidCount).toFixed(2);
   summary.avg_free_chat_ai = +(freeChatAi / freeCount).toFixed(2);
 
