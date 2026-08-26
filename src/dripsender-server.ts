@@ -1,12 +1,13 @@
 /**
  * Dripsender MCP server — read-only analytics over the Dripsender SQLite database.
- * 23 tools, all prefixed `dripsender_`.
+ * 25 tools, all prefixed `dripsender_`.
  */
 
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import * as q from "./core/queries.ts";
 import * as dq from "./core/dripsender-queries.ts";
+import { messageStatsByUser, deviceMessageStats } from "./core/message-queries.ts";
 import {
   type ServerConfig,
   camelArgs,
@@ -374,6 +375,57 @@ server.registerTool(
     }),
   },
   async (args) => ({ content: [{ type: "text", text: json(dq.listTrainingDataFiles(getDb(), camelArgs(args))) }] })
+);
+
+// -- message analytics -------------------------------------------------------
+
+server.registerTool(
+  "dripsender_message_stats",
+  {
+    description:
+      "Dripsender message statistics: total sent, Chat AI sent, paid vs free averages, per-user breakdown. Uses portal persistent counters (full coverage) + WA server HTTP queue scan (partial). Paid = membership_date > today. Free split into never_paid (no membership) vs expired (membership in past).",
+    inputSchema: z.object({
+      paid_only: z.boolean().optional().nullable(),
+      free_only: z.boolean().optional().nullable(),
+      date_from: z.string().optional().nullable(),
+      date_to: z.string().optional().nullable(),
+      limit: z.number().optional().default(50),
+      offset: z.number().optional().default(0),
+    }),
+  },
+  async (args) => {
+    const result = await messageStatsByUser(getDb(), "", {
+      paidOnly: args.paid_only ?? null,
+      freeOnly: args.free_only ?? null,
+      dateFrom: args.date_from ?? null,
+      dateTo: args.date_to ?? null,
+      limit: args.limit,
+      offset: args.offset,
+    });
+    return { content: [{ type: "text", text: json(result) }] };
+  }
+);
+
+server.registerTool(
+  "dripsender_device_message_stats",
+  {
+    description:
+      "Dripsender per-device message breakdown by status + source + daily counts + recent messages. Fetches from WA server instance via HTTP. Returns portal counters + live queue stats.",
+    inputSchema: z.object({
+      whatsapp_id: z.string(),
+      date_from: z.string().optional().nullable(),
+      date_to: z.string().optional().nullable(),
+      recent_limit: z.number().optional().default(10),
+    }),
+  },
+  async (args) => {
+    const result = await deviceMessageStats(getDb(), "", args.whatsapp_id, {
+      dateFrom: args.date_from ?? null,
+      dateTo: args.date_to ?? null,
+      recentLimit: args.recent_limit,
+    });
+    return { content: [{ type: "text", text: json(result) }] };
+  }
 );
 
 // -- entry -------------------------------------------------------------------

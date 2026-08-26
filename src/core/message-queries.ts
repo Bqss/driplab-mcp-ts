@@ -105,6 +105,11 @@ export async function messageStatsByUser(
   if (opts.paidOnly === true) b.clauses.push(PAID_CLAUSE);
   if (opts.freeOnly === true) b.clauses.push(FREE_CLAUSE);
 
+  // Detect schema: trial_sent_count and cap_reached_at may not exist (e.g. dripsender)
+  const waCols = mainDb.query<{ name: string }>("PRAGMA table_info(whatsapps)");
+  const hasTrialSent = waCols.some((c) => c.name === "trial_sent_count");
+  const hasCapReached = waCols.some((c) => c.name === "cap_reached_at");
+
   const whereSql = `WHERE ${b.clauses.join(" AND ")}`;
   const devices = mainDb.query<{
     id: string;
@@ -127,8 +132,8 @@ export async function messageStatsByUser(
             u.membership_date, u.plan_id,
             COALESCE(w.total_sent_count, 0) AS total_sent_count,
             COALESCE(w.chat_ai_sent_count, 0) AS chat_ai_sent_count,
-            COALESCE(w.trial_sent_count, 0) AS trial_sent_count,
-            w.cap_reached_at
+            ${hasTrialSent ? "COALESCE(w.trial_sent_count, 0)" : "0"} AS trial_sent_count,
+            ${hasCapReached ? "w.cap_reached_at" : "NULL"} AS cap_reached_at
        FROM whatsapps w
        INNER JOIN users u ON u.id = w.user_id
       ${whereSql}
@@ -340,6 +345,11 @@ export async function deviceMessageStats(
     return { error: "whatsapps table not found" };
   }
 
+  // Detect schema: trial_sent_count and cap_reached_at may not exist (e.g. dripsender)
+  const waCols2 = mainDb.query<{ name: string }>("PRAGMA table_info(whatsapps)");
+  const hasTrialSent2 = waCols2.some((c) => c.name === "trial_sent_count");
+  const hasCapReached2 = waCols2.some((c) => c.name === "cap_reached_at");
+
   const wa = mainDb.queryOne<{
     id: string;
     user_id: string;
@@ -356,8 +366,8 @@ export async function deviceMessageStats(
     `SELECT id, user_id, phone, status, port, connect_url, name,
             COALESCE(total_sent_count, 0) AS total_sent_count,
             COALESCE(chat_ai_sent_count, 0) AS chat_ai_sent_count,
-            COALESCE(trial_sent_count, 0) AS trial_sent_count,
-            cap_reached_at
+            ${hasTrialSent2 ? "COALESCE(trial_sent_count, 0)" : "0"} AS trial_sent_count,
+            ${hasCapReached2 ? "cap_reached_at" : "NULL"} AS cap_reached_at
        FROM whatsapps WHERE id = ?`,
     whatsappId
   );
