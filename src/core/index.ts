@@ -8,7 +8,6 @@ export { formatMoney } from "./money.ts";
 export type { Currency } from "./money.ts";
 export * as queries from "./queries.ts";
 export * as wajomQueries from "./wajom-queries.ts";
-export * as dripsenderQueries from "./dripsender-queries.ts";
 export * as trialQueries from "./trial-queries.ts";
 export * as messageQueries from "./message-queries.ts";
 export { resolveWaServerDb } from "./wa-server-db.ts";

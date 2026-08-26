@@ -1,12 +1,12 @@
 {
-  "name": "driplab-mcp-ts",
+  "name": "wajom-mcp",
   "version": "0.1.0",
-  "description": "MCP servers for Wajom and Dripsender — read-only analytics over SQLite. TypeScript version.",
+  "description": "Wajom MCP server — read-only analytics over SQLite. TypeScript.",
   "type": "module",
   "private": true,
   "scripts": {
+    "start": "node --experimental-strip-types src/wajom-server.ts",
     "wajom": "node --experimental-strip-types src/wajom-server.ts",
-    "dripsender": "node --experimental-strip-types src/dripsender-server.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
