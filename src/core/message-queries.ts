@@ -30,6 +30,24 @@ import { fetchQueueStats, fetchQueueStatsBatch, type QueueStatsResponse } from "
 
 type Row = Record<string, unknown>;
 
+/**
+ * Definition of "paid" in Wajom:
+ *   membership_date IS NOT NULL AND membership_date > today
+ *
+ * The `paid_user` flag in users table is NEVER set by the payment flow.
+ * The actual indicator is `membership_date` (set by UserController when
+ * a sale completes). We use it as the source of truth for paid status.
+ */
+const PAID_CLAUSE = "(u.membership_date IS NOT NULL AND u.membership_date != '' AND u.membership_date > date('now'))";
+const FREE_CLAUSE = "(u.membership_date IS NULL OR u.membership_date = '' OR u.membership_date <= date('now'))";
+
+/** Check if a user is paid based on membership_date (in JS, not SQL). */
+function isPaid(membershipDate: string | null): boolean {
+  if (!membershipDate || membershipDate === "") return false;
+  const today = new Date().toISOString().slice(0, 10);
+  return membershipDate > today;
+}
+
 interface DeviceMessageCount {
   whatsapp_id: string;
   user_id: string;
@@ -40,6 +58,7 @@ interface DeviceMessageCount {
   port: number | null;
   connect_url: string | null;
   paid_user: boolean;
+  membership_date: string | null;
   plan_id: string | null;
   sent_count: number;
   read_count: number;
@@ -80,10 +99,11 @@ export async function messageStatsByUser(
   }
 
   // Ambil semua device non-deleted + join user info + connect_url.
+  // Definisi paid: membership_date > today (paid_user flag tidak pernah di-set).
   const b: { clauses: string[]; params: unknown[] } = { clauses: [], params: [] };
   b.clauses.push("(w.delete_time IS NULL OR w.delete_time = 0)");
-  if (opts.paidOnly === true) b.clauses.push("u.paid_user = 1");
-  if (opts.freeOnly === true) b.clauses.push("(u.paid_user = 0 OR u.paid_user IS NULL)");
+  if (opts.paidOnly === true) b.clauses.push(PAID_CLAUSE);
+  if (opts.freeOnly === true) b.clauses.push(FREE_CLAUSE);
 
   const whereSql = `WHERE ${b.clauses.join(" AND ")}`;
   const devices = mainDb.query<{
@@ -95,7 +115,7 @@ export async function messageStatsByUser(
     connect_url: string | null;
     user_name: string;
     user_email: string;
-    paid_user: number;
+    membership_date: string | null;
     plan_id: string | null;
     total_sent_count: number;
     chat_ai_sent_count: number;
@@ -104,7 +124,7 @@ export async function messageStatsByUser(
   }>(
     `SELECT w.id, w.user_id, w.phone, w.status, w.port, w.connect_url,
             u.name AS user_name, u.email AS user_email,
-            u.paid_user, u.plan_id,
+            u.membership_date, u.plan_id,
             COALESCE(w.total_sent_count, 0) AS total_sent_count,
             COALESCE(w.chat_ai_sent_count, 0) AS chat_ai_sent_count,
             COALESCE(w.trial_sent_count, 0) AS trial_sent_count,
@@ -152,7 +172,8 @@ export async function messageStatsByUser(
       status: d.status,
       port: d.port,
       connect_url: d.connect_url,
-      paid_user: d.paid_user === 1,
+      paid_user: isPaid(d.membership_date),
+      membership_date: d.membership_date,
       plan_id: d.plan_id,
       sent_count: counts.sent,
       read_count: counts.read,
@@ -173,6 +194,7 @@ export async function messageStatsByUser(
     user_name: string;
     user_email: string;
     paid_user: boolean;
+    membership_date: string | null;
     plan_id: string | null;
     device_count: number;
     devices_with_db: number;
@@ -195,6 +217,7 @@ export async function messageStatsByUser(
         user_name: d.user_name,
         user_email: d.user_email,
         paid_user: d.paid_user,
+        membership_date: d.membership_date,
         plan_id: d.plan_id,
         device_count: 0,
         devices_with_db: 0,
@@ -306,8 +329,8 @@ export async function deviceMessageStats(
   );
   if (!wa) return { error: "whatsapp device not found" };
 
-  const user = mainDb.queryOne<{ name: string; email: string; paid_user: number; plan_id: string | null }>(
-    "SELECT name, email, paid_user, plan_id FROM users WHERE id = ?",
+  const user = mainDb.queryOne<{ name: string; email: string; membership_date: string | null; plan_id: string | null }>(
+    "SELECT name, email, membership_date, plan_id FROM users WHERE id = ?",
     wa.user_id
   );
 

@@ -475,15 +475,20 @@ export function trialFunnel(
 }
 
 /**
- * Audit: reconcile users.paid_user vs users.purchase_number vs sales.
+ * Audit: reconcile paid status across multiple signals.
  *
- * Implements recommendation #1 from the Aug-2026 trial readout:
- * "Audit definisi paid_user vs purchase_number dan backfill event".
+ * The `paid_user` flag in users table is NEVER set by the payment flow.
+ * The actual indicator is `membership_date` (set by UserController when
+ * a sale completes). This audit cross-checks:
+ *  - membership_date (actual paid indicator)
+ *  - purchase_number (counter incremented on each sale)
+ *  - sales table (Purchase/Complete status)
  *
- * Flags three mismatch classes:
- *  - paid_user=1 but no Purchase/Complete sale  (stale flag)
- *  - purchase_number>0 but paid_user=0          (under-flagged)
- *  - has Purchase sale but purchase_number=0     (counter not incremented)
+ * Flags mismatch classes:
+ *  - has_sale_no_membership: Purchase/Complete sale but no membership_date
+ *  - purchase_number_no_membership: purchase_number > 0 but no membership_date
+ *  - membership_no_sale: membership_date set but no Purchase/Complete sale
+ *  - sale_no_purchase_number: has sale but purchase_number = 0
  */
 export function paidUserAudit(
   db: SqlDatabase,
@@ -497,6 +502,7 @@ export function paidUserAudit(
   const summary = db.queryOne<{
     total: number;
     paid_flagged: number;
+    with_membership: number;
     with_purchase_number: number;
     with_purchase_sale: number;
     mismatch_paid_no_sale: number;
@@ -506,10 +512,11 @@ export function paidUserAudit(
     `SELECT
        COUNT(*) AS total,
        SUM(CASE WHEN paid_user = 1 THEN 1 ELSE 0 END) AS paid_flagged,
+       SUM(CASE WHEN membership_date IS NOT NULL AND membership_date != '' THEN 1 ELSE 0 END) AS with_membership,
        SUM(CASE WHEN purchase_number > 0 THEN 1 ELSE 0 END) AS with_purchase_number,
        SUM(CASE WHEN id IN (SELECT user_id FROM sales WHERE status IN ('Purchase','Complete')) THEN 1 ELSE 0 END) AS with_purchase_sale,
-       SUM(CASE WHEN paid_user = 1 AND id NOT IN (SELECT user_id FROM sales WHERE status IN ('Purchase','Complete')) THEN 1 ELSE 0 END) AS mismatch_paid_no_sale,
-       SUM(CASE WHEN purchase_number > 0 AND paid_user = 0 THEN 1 ELSE 0 END) AS mismatch_pnum_not_paid,
+       SUM(CASE WHEN (membership_date IS NOT NULL AND membership_date != '') AND id NOT IN (SELECT user_id FROM sales WHERE status IN ('Purchase','Complete')) THEN 1 ELSE 0 END) AS mismatch_paid_no_sale,
+       SUM(CASE WHEN purchase_number > 0 AND (membership_date IS NULL OR membership_date = '') THEN 1 ELSE 0 END) AS mismatch_pnum_not_paid,
        SUM(CASE WHEN id IN (SELECT user_id FROM sales WHERE status IN ('Purchase','Complete')) AND purchase_number = 0 THEN 1 ELSE 0 END) AS mismatch_sale_no_pnum
       FROM users
       WHERE is_admin = 0`
@@ -527,11 +534,12 @@ export function paidUserAudit(
        FROM users u
       WHERE u.is_admin = 0
         AND (
-          (u.paid_user = 1 AND u.id NOT IN (SELECT user_id FROM sales WHERE status IN ('Purchase','Complete')))
-          OR (u.purchase_number > 0 AND u.paid_user = 0)
+          ((u.membership_date IS NOT NULL AND u.membership_date != '') AND u.id NOT IN (SELECT user_id FROM sales WHERE status IN ('Purchase','Complete')))
+          OR (u.purchase_number > 0 AND (u.membership_date IS NULL OR u.membership_date = ''))
+          OR (u.id IN (SELECT user_id FROM sales WHERE status IN ('Purchase','Complete')) AND (u.membership_date IS NULL OR u.membership_date = ''))
           OR (u.id IN (SELECT user_id FROM sales WHERE status IN ('Purchase','Complete')) AND u.purchase_number = 0)
         )
-      ORDER BY u.created_at DESC
+      ORDER BY u.purchase_number DESC, u.created_at DESC
       LIMIT ? OFFSET ?`,
     limit,
     offset
@@ -539,9 +547,12 @@ export function paidUserAudit(
 
   const flagged = rows.map((r) => {
     const flags: string[] = [];
-    if (r.paid_user === 1 && r.sale_count === 0) flags.push("paid_flag_no_sale");
-    if (Number(r.purchase_number) > 0 && r.paid_user === 0) flags.push("purchase_number_not_paid");
-    if (Number(r.sale_count) > 0 && Number(r.purchase_number) === 0) flags.push("sale_no_purchase_number");
+    const hasMembership = r.membership_date && r.membership_date !== "";
+    const hasSale = Number(r.sale_count) > 0;
+    if (hasSale && !hasMembership) flags.push("has_sale_no_membership");
+    if (Number(r.purchase_number) > 0 && !hasMembership) flags.push("purchase_number_no_membership");
+    if (hasMembership && !hasSale) flags.push("membership_no_sale");
+    if (hasSale && Number(r.purchase_number) === 0) flags.push("sale_no_purchase_number");
     return { ...convertEpochs([r], ["created_at", "last_sale_at"])[0], mismatch_flags: flags };
   });
 
