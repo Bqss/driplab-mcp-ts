@@ -6,7 +6,12 @@
 
 import { SqlDatabase } from "./db.ts";
 import { stripPii } from "./pii.ts";
-import { convertEpochs, parseDateRange, epochMsToIso } from "./time.ts";
+import {
+  convertEpochs,
+  parseDateRange,
+  epochMsToIso,
+  tzOffsetSecondsAt,
+} from "./time.ts";
 
 type Row = Record<string, unknown>;
 
@@ -163,8 +168,10 @@ export function listOrders(
   where(b, db, "sales", "coupon_code", "=", opts.couponCode);
   where(b, db, "sales", "product", "=", opts.product);
   const [startMs, endMs] = parseDateRange(opts.dateFrom, opts.dateTo);
-  // Match admin portal: filter by updated_at (payment/fulfillment date),
-  // not created_at (checkout date). See wajom SaleController.loadMoreSales.
+  // Match the admin sales-list page (SaleController.loadMoreSales), which
+  // filters by updated_at (payment/fulfillment date) — NOT the admin
+  // overview page, which filters by created_at (checkout date). See
+  // `orderStats` below for the overview-matching variant.
   where(b, db, "sales", "updated_at", ">=", startMs);
   where(b, db, "sales", "updated_at", "<=", endMs);
   const whereSql = b.clauses.length ? `WHERE ${b.clauses.join(" AND ")}` : "";
@@ -211,9 +218,13 @@ export function orderStats(
 ): Record<string, unknown> {
   const b: WhereBuilder = { clauses: [], params: [] };
   const [startMs, endMs] = parseDateRange(opts.dateFrom, opts.dateTo);
-  // Match admin portal: filter by updated_at (payment/fulfillment date).
-  where(b, db, "sales", "updated_at", ">=", startMs);
-  where(b, db, "sales", "updated_at", "<=", endMs);
+  // Match the admin OVERVIEW page (SalesService.getSalesSummary), which
+  // filters by created_at (checkout date). The sales-LIST page uses
+  // updated_at instead — see `listOrders` above. These two must NOT be
+  // confused: mixing them produces the "order tercatat 26 Aug tapi masuk
+  // bucket 25 Aug" symptom seen in the overview-vs-MCP discrepancy.
+  where(b, db, "sales", "created_at", ">=", startMs);
+  where(b, db, "sales", "created_at", "<=", endMs);
   const whereSql = b.clauses.length ? `WHERE ${b.clauses.join(" AND ")}` : "";
   const groupBy = opts.groupBy ?? "status";
 
@@ -233,8 +244,16 @@ export function orderStats(
   }
   if (groupBy === "day" || groupBy === "month") {
     const fmt = groupBy === "day" ? "%Y-%m-%d" : "%Y-%m";
+    // Apply the portal-TZ offset so day/month buckets align with the
+    // admin overview (Asia/Jakarta, UTC+7). Without this, an order at
+    // 03:50 WIB on 26 Aug is stored as 26 Aug 03:50 WIB = 25 Aug 20:50 UTC,
+    // and `strftime(..., 'unixepoch')` (which is UTC) buckets it as 25 Aug.
+    const offsetSec = tzOffsetSecondsAt(startMs ?? Date.now());
+    const offsetMod = offsetSec >= 0
+      ? `'+${offsetSec} seconds'`
+      : `'${offsetSec} seconds'`;
     const rows = db.query<{ key: string; count: number; revenue: number }>(
-      `SELECT strftime('${fmt}', datetime(updated_at/1000, 'unixepoch')) AS key, COUNT(*) AS count, COALESCE(SUM(total),0) AS revenue FROM sales ${whereSql} GROUP BY key ORDER BY key`,
+      `SELECT strftime('${fmt}', datetime(created_at/1000, 'unixepoch', ${offsetMod})) AS key, COUNT(*) AS count, COALESCE(SUM(total),0) AS revenue FROM sales ${whereSql} GROUP BY key ORDER BY key`,
       ...b.params
     );
     return { group_by: groupBy, buckets: rows };
