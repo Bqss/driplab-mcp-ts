@@ -5,10 +5,9 @@ Panduan deploy MCP server Wajom & Dripsender ke server production. Client connec
 ## Arsitektur deploy
 
 ```
-┌──────────────┐    HTTPS/SSE    ┌───────────┐    HTTP/SSE   ┌───────────────┐    read-only    ┌──────────┐
-│  MCP Client  │────────────────►│   Caddy   │──────────────►│  MCP Server   │────────────────►│ SQLite   │
-│ (Cursor/etc) │  https://srv/m  │ (TLS+proxy)│ localhost:8100│ (wajom/drip)  │                 │ DB       │
-└──────────────┘                 └───────────┘               └───────────────┘                 └──────────┘
+│  MCP Client  │──► mcp.wajom.co      ┌───────────┐──► 127.0.0.1:8100 ┌───────────────┐──► ┌──────────┐
+│ (Cursor/etc) │──► mcp.dripsender.id │   Caddy   │──► 127.0.0.1:8101 │  MCP Server   │    │ SQLite   │
+│              │    HTTPS + auto-TLS  │ (TLS+proxy)│    HTTP/SSE       │ (wajom/drip)  │    │ DB       │
                                                                  ↑
                                                             pm2 (process manager):
                                                             pm2 start wajom-server.ts
@@ -19,7 +18,7 @@ Server jalan sebagai HTTP service di VPS, behind Caddy reverse proxy dengan auto
 
 ## Env var reference
 
-Semua config via env var. Copy `.env.example` ke `.env` dan edit.
+Semua config via env var. Copy `.env.example` ke `.env` dan edit — ini satu-satunya tempat edit value, untuk local dev maupun server deploy (`ecosystem.config.cjs` baca `.env` otomatis).
 
 | Variable | Server | Default | Deskripsi |
 |---|---|---|---|
@@ -65,7 +64,7 @@ scp "devdb copy.sqlite3" user@vps:/data/dripsender/prod.sqlite3
 chmod 444 /data/wajom/prod.sqlite3 /data/dripsender/prod.sqlite3
 ```
 
-### 4. Buat .env
+### 4. Buat `.env`
 
 ```bash
 cp .env.example /opt/driplab-mcp-ts/.env
@@ -80,26 +79,20 @@ MCP_TRANSPORT=streamable-http
 MCP_HOST=127.0.0.1
 ```
 
+> `MCP_PORT` tidak perlu di `.env` — tiap server pin port-nya sendiri di
+> `ecosystem.config.cjs` (wajom=8100, dripsender=8101) supaya ga bentrok.
+> `.env` adalah satu-satunya tempat edit value; `ecosystem.config.cjs` baca
+> file ini otomatis saat `pm2 start`.
+
 ### 5. Install pm2 & jalankan server
 
 ```bash
 # Install pm2 global
 npm i -g pm2
 
-# Start kedua server (baca .env otomatis via --env-file)
+# Start kedua server (ecosystem.config.cjs baca .env otomatis)
 cd /opt/driplab-mcp-ts
-
-pm2 start src/wajom-server.ts \
-  --name wajom-mcp \
-  --interpreter node --interpreter-args "--experimental-strip-types" \
-  --env-file .env \
-  -- MCP_PORT=8100
-
-pm2 start src/dripsender-server.ts \
-  --name dripsender-mcp \
-  --interpreter node --interpreter-args "--experimental-strip-types" \
-  --env-file .env \
-  -- MCP_PORT=8101
+pm2 start ecosystem.config.cjs
 
 # Save process list (auto-restart setelah reboot)
 pm2 save
@@ -144,24 +137,19 @@ sudo nano /etc/caddy/Caddyfile
 ```
 
 ```caddyfile
-mcp.yourdomain.com {
-	# Wajom MCP server
-	handle /wajom/* {
-		reverse_proxy 127.0.0.1:8100 {
-			# SSE: flush immediately, don't buffer
-			flush_interval -1
-		}
+# Wajom MCP server
+mcp.wajom.co {
+	reverse_proxy 127.0.0.1:8100 {
+		# SSE: flush immediately, don't buffer
+		flush_interval -1
 	}
+}
 
-	# Dripsender MCP server
-	handle /dripsender/* {
-		reverse_proxy 127.0.0.1:8101 {
-			flush_interval -1
-		}
+# Dripsender MCP server
+mcp.dripsender.id {
+	reverse_proxy 127.0.0.1:8101 {
+		flush_interval -1
 	}
-
-	# Default: 404
-	respond "Not Found" 404
 }
 ```
 
@@ -174,12 +162,13 @@ sudo systemctl enable --now caddy
 # Cek status
 sudo systemctl status caddy
 
-# Cek TLS certificate (auto-provisioned)
-curl -v https://mcp.yourdomain.com/wajom/mcp 2>&1 | grep "SSL connection"
+# Cek TLS certificate (auto-provisioned per domain)
+curl -v https://mcp.wajom.co/mcp 2>&1 | grep "SSL connection"
+curl -v https://mcp.dripsender.id/mcp 2>&1 | grep "SSL connection"
 ```
 
 Caddy akan otomatis:
-- Provision TLS certificate dari Let's Encrypt
+- Provision TLS certificate dari Let's Encrypt (per domain)
 - Renewal otomatis sebelum expired
 - Redirect HTTP → HTTPS
 - Proxy request ke MCP server dengan SSE support
@@ -191,12 +180,11 @@ Caddy akan otomatis:
 {
   "mcpServers": {
     "wajom": {
-      "url": "https://mcp.yourdomain.com/wajom/mcp"
+      "url": "https://mcp.wajom.co/mcp"
     },
     "dripsender": {
-      "url": "https://mcp.yourdomain.com/dripsender/mcp"
+      "url": "https://mcp.dripsender.id/mcp"
     }
-  }
 }
 ```
 
@@ -225,21 +213,23 @@ Untuk development lokal, tetap pakai stdio. Lihat [SETUP.md](./SETUP.md).
 Kalau mau protect endpoint dengan username/password:
 
 ```caddyfile
-mcp.yourdomain.com {
+# Wajom
+mcp.wajom.co {
 	basic_auth {
 		mcp $2a$14$...hashed-password...  # generate dengan: caddy hash-password
 	}
-
-	handle /wajom/* {
-		reverse_proxy 127.0.0.1:8100 {
-			flush_interval -1
-		}
+	reverse_proxy 127.0.0.1:8100 {
+		flush_interval -1
 	}
+}
 
-	handle /dripsender/* {
-		reverse_proxy 127.0.0.1:8101 {
-			flush_interval -1
-		}
+# Dripsender
+mcp.dripsender.id {
+	basic_auth {
+		mcp $2a$14$...hashed-password...
+	}
+	reverse_proxy 127.0.0.1:8101 {
+		flush_interval -1
 	}
 }
 ```
@@ -253,15 +243,20 @@ caddy hash-password --plaintext "your-secret-password"
 > **Catatan:** Sebagian MCP client mungkin tidak support HTTP basic auth. Test dulu dengan client lo. Kalau bermasalah, gunakan IP allowlist saja:
 
 ```caddyfile
-mcp.yourdomain.com {
+# Wajom
+mcp.wajom.co {
 	@allowed remote_ip 1.2.3.4 5.6.7.8  # IP yang diizinkan
 	handle @allowed {
-		handle /wajom/* {
-			reverse_proxy 127.0.0.1:8100 { flush_interval -1 }
-		}
-		handle /dripsender/* {
-			reverse_proxy 127.0.0.1:8101 { flush_interval -1 }
-		}
+		reverse_proxy 127.0.0.1:8100 { flush_interval -1 }
+	}
+	respond "Forbidden" 403
+}
+
+# Dripsender
+mcp.dripsender.id {
+	@allowed remote_ip 1.2.3.4 5.6.7.8
+	handle @allowed {
+		reverse_proxy 127.0.0.1:8101 { flush_interval -1 }
 	}
 	respond "Forbidden" 403
 }
@@ -313,7 +308,7 @@ sudo systemctl status caddy
 sudo journalctl -u caddy -f
 
 # Health check (lewat Caddy, dari luar)
-curl -s -X POST https://mcp.yourdomain.com/wajom/mcp \
+curl -s -X POST https://mcp.wajom.co/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}}}'

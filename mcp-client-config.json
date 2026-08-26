@@ -1,18 +1,10 @@
 {
   "mcpServers": {
     "wajom": {
-      "command": "node",
-      "args": ["--experimental-strip-types", "/Users/mac/Projects/driplab/wajomm/driplab-mcp-ts/src/wajom-server.ts"],
-      "env": {
-        "WAJOM_DB_PATH": "/Users/mac/Projects/driplab/wajomm/driplab-mcp/devdb.sqlite3"
-      }
+      "url": "https://mcp.wajom.co/mcp"
     },
     "dripsender": {
-      "command": "node",
-      "args": ["--experimental-strip-types", "/Users/mac/Projects/driplab/wajomm/driplab-mcp-ts/src/dripsender-server.ts"],
-      "env": {
-        "DRIPSENDER_DB_PATH": "/Users/mac/Projects/driplab/wajomm/driplab-mcp/devdb copy.sqlite3"
-      }
+      "url": "https://mcp.dripsender.id/mcp"
     }
   }
 }
