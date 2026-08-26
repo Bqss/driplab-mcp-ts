@@ -22,6 +22,22 @@ export function portalTimezone(): string {
 }
 
 /**
+ * Today's calendar date (YYYY-MM-DD) in the portal timezone.
+ * Use this instead of SQLite `date('now')` (which is UTC) or
+ * `new Date().toISOString().slice(0,10)` (also UTC) when comparing
+ * against date-only columns like `membership_date`. The portal uses
+ * `dayjs().tz('Asia/Jakarta').format('YYYY-MM-DD')` — this matches.
+ */
+export function portalToday(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ_NAME,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+/**
  * Offset (in milliseconds east of UTC) of `TZ_NAME` at the given UTC instant.
  * Uses Intl.DateTimeFormat so it respects DST for zones that observe it.
  * Asia/Jakarta has no DST, so the result is a constant +7h.

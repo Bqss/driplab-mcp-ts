@@ -25,7 +25,7 @@
 
 import { SqlDatabase } from "./db.ts";
 import { stripPii } from "./pii.ts";
-import { epochMsToIso } from "./time.ts";
+import { epochMsToIso, portalToday } from "./time.ts";
 import { fetchQueueStats, fetchQueueStatsBatch, type QueueStatsResponse } from "./wa-server-api.ts";
 
 type Row = Record<string, unknown>;
@@ -37,15 +37,24 @@ type Row = Record<string, unknown>;
  * The `paid_user` flag in users table is NEVER set by the payment flow.
  * The actual indicator is `membership_date` (set by UserController when
  * a sale completes). We use it as the source of truth for paid status.
+ *
+ * IMPORTANT: "today" must be the portal-TZ date (Asia/Jakarta), NOT UTC.
+ * The portal uses `dayjs().tz('Asia/Jakarta').format('YYYY-MM-DD')`.
+ * Using SQLite `date('now')` (UTC) or `new Date().toISOString().slice(0,10)`
+ * (also UTC) would misclassify users as paid for up to 7 extra hours after
+ * their membership expires in WIB.
  */
-const PAID_CLAUSE = "(u.membership_date IS NOT NULL AND u.membership_date != '' AND u.membership_date > date('now'))";
-const FREE_CLAUSE = "(u.membership_date IS NULL OR u.membership_date = '' OR u.membership_date <= date('now'))";
+function paidClause(today: string): string {
+  return `(u.membership_date IS NOT NULL AND u.membership_date != '' AND u.membership_date > '${today}')`;
+}
+function freeClause(today: string): string {
+  return `(u.membership_date IS NULL OR u.membership_date = '' OR u.membership_date <= '${today}')`;
+}
 
 /** Check if a user is paid based on membership_date (in JS, not SQL). */
 function isPaid(membershipDate: string | null): boolean {
   if (!membershipDate || membershipDate === "") return false;
-  const today = new Date().toISOString().slice(0, 10);
-  return membershipDate > today;
+  return membershipDate > portalToday();
 }
 
 interface DeviceMessageCount {
@@ -100,10 +109,11 @@ export async function messageStatsByUser(
 
   // Ambil semua device non-deleted + join user info + connect_url.
   // Definisi paid: membership_date > today (paid_user flag tidak pernah di-set).
+  const today = portalToday();
   const b: { clauses: string[]; params: unknown[] } = { clauses: [], params: [] };
   b.clauses.push("(w.delete_time IS NULL OR w.delete_time = 0)");
-  if (opts.paidOnly === true) b.clauses.push(PAID_CLAUSE);
-  if (opts.freeOnly === true) b.clauses.push(FREE_CLAUSE);
+  if (opts.paidOnly === true) b.clauses.push(paidClause(today));
+  if (opts.freeOnly === true) b.clauses.push(freeClause(today));
 
   // Detect schema: trial_sent_count and cap_reached_at may not exist (e.g. dripsender)
   const waCols = mainDb.query<{ name: string }>("PRAGMA table_info(whatsapps)");
@@ -272,9 +282,9 @@ export async function messageStatsByUser(
   const paidUsers = users.filter((u) => u.paid_user);
   const freeUsers = users.filter((u) => !u.paid_user);
   // free = never_paid (no membership_date) + expired (membership_date in past)
-  const today = new Date().toISOString().slice(0, 10);
+  const todayDate = portalToday();
   const neverPaidUsers = freeUsers.filter((u) => !u.membership_date || u.membership_date === "");
-  const expiredUsers = freeUsers.filter((u) => u.membership_date && u.membership_date !== "" && u.membership_date <= today);
+  const expiredUsers = freeUsers.filter((u) => u.membership_date && u.membership_date !== "" && u.membership_date <= todayDate);
   const summary = {
     total_users: users.length,
     paid_users: paidUsers.length,

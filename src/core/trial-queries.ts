@@ -14,7 +14,7 @@
 
 import { SqlDatabase } from "./db.ts";
 import { stripPii } from "./pii.ts";
-import { convertEpochs, parseDateRange, epochMsToIso, nowMs } from "./time.ts";
+import { convertEpochs, parseDateRange, epochMsToIso, nowMs, tzOffsetSecondsAt } from "./time.ts";
 import {
   TRIAL,
   TRIAL_STATUS_LABELS,
@@ -241,14 +241,22 @@ export function getTrialUserDetail(db: SqlDatabase, userId: string): Row | undef
 
   // Daily activity events (closest proxy to engagement over time;
   // trial_sent_count is a running total, not time-series).
+  // Apply portal-TZ offset so day buckets align with Asia/Jakarta (UTC+7).
+  // Without this, an event at 03:50 WIB on 26 Aug = 25 Aug 20:50 UTC would
+  // be bucketed as 25 Aug. NOTE: the portal (UserController.ts) currently
+  // has the same UTC bucketing bug — fixing both is the correct path.
   let dailyActivity: Row[] = [];
   if (db.hasTable("activity_tracking_events")) {
+    const offsetSec = tzOffsetSecondsAt(nowMs());
+    const offsetMod = offsetSec >= 0
+      ? `'+${offsetSec} seconds'`
+      : `'${offsetSec} seconds'`;
     dailyActivity = db.query<Row>(
-      `SELECT DATE(created_at / 1000, 'unixepoch') AS date,
+      `SELECT strftime('%Y-%m-%d', datetime(created_at / 1000, 'unixepoch', ${offsetMod})) AS date,
               COUNT(*) AS count
          FROM activity_tracking_events
         WHERE user_id = ?
-        GROUP BY DATE(created_at / 1000, 'unixepoch')
+        GROUP BY strftime('%Y-%m-%d', datetime(created_at / 1000, 'unixepoch', ${offsetMod}))
         ORDER BY date DESC
         LIMIT 30`,
       userId
